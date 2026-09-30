@@ -1,0 +1,32 @@
+# ビルド成果物・ログ
+bin/
+obj/
+*.exe
+*.pdb
+*.dll
+*.cache
+build_log.txt
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# 設定・自動保存(個人環境のファイル、リポジトリには含めない)
+okaed.ini
+*.ini
+autosave/
+
+# 開発時の作業フォルダ・中間生成物(公開しない)
+Claude outputs/
+claude/
+.claude/
+CLAUDE.md
+icon/__pycache__/
+icon/*.png
+*.pyc
+
+# OS生成ファイル
+Thumbs.db
+desktop.ini
+.DS_Store

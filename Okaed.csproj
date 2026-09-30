@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Visual Studio / dotnet build 用。外部パッケージ不要。 -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <!-- .NET 8 で作る場合は上を net8.0-windows に変更 -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Okaed</AssemblyName>
+    <RootNamespace>Okaed</RootNamespace>
+  </PropertyGroup>
+</Project>
