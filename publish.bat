@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0publish.ps1"
 if errorlevel 1 (
   echo.
@@ -7,5 +8,5 @@ if errorlevel 1 (
 ) else (
   echo.
   echo 公開処理が完了しました。
-  timeout /t 3 >nul
+  pause
 )
