@@ -40,6 +40,16 @@ namespace Okaed
         public void Set(string k, int v) { d[k] = v.ToString(CultureInfo.InvariantCulture); }
         public void Set(string k, float v) { d[k] = v.ToString(CultureInfo.InvariantCulture); }
 
+        public void Remove(string k) { d.Remove(k); }
+
+        /// <summary>指定の接頭辞で始まるキーの一覧</summary>
+        public List<string> KeysWithPrefix(string prefix)
+        {
+            List<string> r = new List<string>();
+            foreach (string k in d.Keys) if (k.StartsWith(prefix, StringComparison.Ordinal)) r.Add(k);
+            return r;
+        }
+
         public void Save()
         {
             try

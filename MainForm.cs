@@ -12,7 +12,7 @@ using System.Windows.Forms;
 
 namespace Okaed
 {
-    public class MainForm : Form
+    public partial class MainForm : Form
     {
         const string AppName = "Okaed";
         static string AppTitleWithVersion
@@ -51,7 +51,6 @@ namespace Okaed
         ToolStripStatusLabel lblPos, lblMsg, lblCount;
         ToolStripDropDownButton ddEnc, ddEol;
         ToolStripMenuItem miPreview, miEncSjis, miEncUtf8, miEolCrlf, miEolLf;
-        ToolStripMenuItem miNumColorOn, miLetterColorOn, miSymbolColorOn;
         ToolStripMenuItem mRecent;
 
         readonly Timer tmrMatch = new Timer();
@@ -75,13 +74,16 @@ namespace Okaed
             public ThemeColors(Color back, Color fore, Color number, Color letter, Color invisible)
             { Back = back; Fore = fore; Number = number; Letter = letter; Invisible = invisible; }
         }
-        // VSCode 既定配色を参考にしたライト/ダークのデフォルト値
+        // 既定色(「既定の色に戻す」と初回起動時に使う)
+        static readonly Color DefLightNumber = Color.FromArgb(255, 0, 0), DefLightLetter = Color.FromArgb(0, 57, 255);
+        static readonly Color DefDarkNumber = Color.FromArgb(255, 155, 155), DefDarkLetter = Color.FromArgb(92, 207, 255);
+        static readonly Color DefLightInvisible = Color.FromArgb(30, 30, 30), DefDarkInvisible = Color.FromArgb(221, 199, 172);
         ThemeColors lightTheme = new ThemeColors(
             Color.FromArgb(255, 255, 255), Color.FromArgb(0, 0, 0),
-            Color.FromArgb(9, 134, 88), Color.FromArgb(0, 16, 128), Color.FromArgb(70, 140, 210));
+            DefLightNumber, DefLightLetter, DefLightInvisible);
         ThemeColors darkTheme = new ThemeColors(
             Color.FromArgb(30, 30, 30), Color.FromArgb(212, 212, 212),
-            Color.FromArgb(181, 206, 168), Color.FromArgb(156, 220, 254), Color.FromArgb(160, 160, 170));
+            DefDarkNumber, DefDarkLetter, DefDarkInvisible);
         bool darkMode = false;
         ThemeColors CurTheme { get { return darkMode ? darkTheme : lightTheme; } }
         ToolStripMenuItem miThemeLight, miThemeDark;
@@ -178,6 +180,7 @@ namespace Okaed
             editor.DragDrop += OnDragDrop;
             editor.ContextMenuStrip = BuildContextMenu();
             editor.TripleClick += delegate { ResetWindowToDefaultSize(); };
+            InitBookmarks();
 
             split = new SplitContainer();
             split.Dock = DockStyle.Fill;
@@ -185,6 +188,7 @@ namespace Okaed
             split.Panel2Collapsed = true;
             split.SplitterWidth = S(5);
             split.Panel1.Controls.Add(editor);
+            split.Panel1.Controls.Add(bmGutter);   // 後に追加した方が外側(左端)に配置される
             split.SplitterMoved += delegate { if (!split.Panel2Collapsed) settings.Set("SplitRatio", (float)split.SplitterDistance / Math.Max(1, split.Width)); };
 
             // ---- メニュー(ファイル操作など最小限)----
@@ -194,6 +198,7 @@ namespace Okaed
             mFile.DropDownItems.Add(MI("開く(&O)...", Keys.Control | Keys.O, delegate { OpenDialog(); }));
             mFile.DropDownItems.Add(MI("上書き保存(&S)", Keys.Control | Keys.S, delegate { Save(); }));
             mFile.DropDownItems.Add(MI("名前を付けて保存(&A)...", Keys.Control | Keys.Shift | Keys.S, delegate { SaveAs(); }));
+            mFile.DropDownItems.Add(MI("拡張子の変更(&E)...", Keys.None, delegate { ChangeExtension(); }));
             mFile.DropDownItems.Add(new ToolStripSeparator());
             mRecent = new ToolStripMenuItem("最近使ったファイル(&R)");
             mFile.DropDownItems.Add(mRecent);
@@ -208,10 +213,21 @@ namespace Okaed
             mEdit.DropDownItems.Add(miUndo);
             mEdit.DropDownItems.Add(miRedo);
             mEdit.DropDownItems.Add(new ToolStripSeparator());
+            // Ctrl+A は検索欄などでも使うため、ショートカットはエディタ側で処理し、ここでは表示のみ
+            ToolStripMenuItem miSelectAll = MI("すべて選択(&A)", Keys.None, delegate { editor.SelectAll(); editor.Focus(); });
+            miSelectAll.ShortcutKeyDisplayString = "Ctrl+A";
+            mEdit.DropDownItems.Add(miSelectAll);
+            mEdit.DropDownItems.Add(new ToolStripSeparator());
             mEdit.DropDownItems.Add(MI("検索(&F)", Keys.Control | Keys.F, delegate { FocusFind(); }));
             mEdit.DropDownItems.Add(MI("置換(&H)", Keys.Control | Keys.H, delegate { FocusReplace(); }));
             mEdit.DropDownItems.Add(MI("次を検索(&N)", Keys.F3, delegate { Find(true); }));
             mEdit.DropDownItems.Add(MI("前を検索(&P)", Keys.Shift | Keys.F3, delegate { Find(false); }));
+            mEdit.DropDownItems.Add(new ToolStripSeparator());
+            ToolStripMenuItem miBmInfo = new ToolStripMenuItem("ブックマークの設定/移動/解除");
+            miBmInfo.ShortcutKeyDisplayString = "Ctrl+1～9";
+            miBmInfo.Enabled = false;
+            mEdit.DropDownItems.Add(miBmInfo);
+            mEdit.DropDownItems.Add(MI("すべてのブックマークを削除(&B)", Keys.None, delegate { DeleteAllBookmarks(); }));
             mEdit.DropDownOpening += delegate { miUndo.Enabled = editor.CanUndoEdit; miRedo.Enabled = editor.CanRedoEdit; };
 
             ToolStripMenuItem mView = new ToolStripMenuItem("表示(&V)");
@@ -230,26 +246,8 @@ namespace Okaed
             mView.DropDownItems.Add(mTheme);
             mView.DropDownItems.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem mNumColor = new ToolStripMenuItem("数値の色");
-            miNumColorOn = new ToolStripMenuItem("テーマの色を使う", null, delegate { colorNumbersOn = !colorNumbersOn; miNumColorOn.Checked = colorNumbersOn; needPaint = true; SaveSettings(); });
-            ToolStripMenuItem miNumColorPick = new ToolStripMenuItem("色を選択...", null, delegate { Color c; if (PickColor(CurTheme.Number, out c)) { CurTheme.Number = c; ApplyTheme(); SaveSettings(); } });
-            mNumColor.DropDownItems.Add(miNumColorOn);
-            mNumColor.DropDownItems.Add(miNumColorPick);
-            mView.DropDownItems.Add(mNumColor);
+            mView.DropDownItems.Add(new ToolStripMenuItem("数値・英字・記号の色(&C)...", null, delegate { ShowNumberLetterColorDialog(); }));
 
-            ToolStripMenuItem mLetterColor = new ToolStripMenuItem("英字の色");
-            miLetterColorOn = new ToolStripMenuItem("テーマの色を使う", null, delegate { colorLettersOn = !colorLettersOn; miLetterColorOn.Checked = colorLettersOn; needPaint = true; SaveSettings(); });
-            ToolStripMenuItem miLetterColorPick = new ToolStripMenuItem("色を選択...", null, delegate { Color c; if (PickColor(CurTheme.Letter, out c)) { CurTheme.Letter = c; ApplyTheme(); SaveSettings(); } });
-            mLetterColor.DropDownItems.Add(miLetterColorOn);
-            mLetterColor.DropDownItems.Add(miLetterColorPick);
-            mView.DropDownItems.Add(mLetterColor);
-
-            ToolStripMenuItem mSymbolColor = new ToolStripMenuItem("記号の色(空白可視化)");
-            miSymbolColorOn = new ToolStripMenuItem("テーマの色を使う", null, delegate { symbolColorOn = !symbolColorOn; miSymbolColorOn.Checked = symbolColorOn; ApplyTheme(); SaveSettings(); });
-            ToolStripMenuItem miSymbolColorPick = new ToolStripMenuItem("色を選択...", null, delegate { Color c; if (PickColor(CurTheme.Invisible, out c)) { CurTheme.Invisible = c; ApplyTheme(); SaveSettings(); } });
-            mSymbolColor.DropDownItems.Add(miSymbolColorOn);
-            mSymbolColor.DropDownItems.Add(miSymbolColorPick);
-            mView.DropDownItems.Add(mSymbolColor);
 
             menu.Items.Add(mFile);
             menu.Items.Add(mEdit);
@@ -388,6 +386,122 @@ namespace Okaed
             DragDrop += OnDragDrop;
         }
 
+        // ======================= 数値・英字の色 =======================
+
+        /// <summary>数値・英字・記号の色を 1 つのダイアログで設定する(変更はエディタ本文にもその場で反映、キャンセルで元に戻す)</summary>
+        void ShowNumberLetterColorDialog()
+        {
+            ThemeColors t = CurTheme;
+            bool oldNumOn = colorNumbersOn, oldLetOn = colorLettersOn, oldSymOn = symbolColorOn;
+            Color oldNum = t.Number, oldLet = t.Letter, oldSym = t.Invisible;
+            Color[] defs = darkMode
+                ? new Color[] { DefDarkNumber, DefDarkLetter, DefDarkInvisible }
+                : new Color[] { DefLightNumber, DefLightLetter, DefLightInvisible };
+            using (ColorSettingsDialog d = new ColorSettingsDialog(
+                darkMode ? "ダークテーマ" : "ライトテーマ", editor.Font, t.Back, t.Fore,
+                new bool[] { colorNumbersOn, colorLettersOn, symbolColorOn },
+                new Color[] { t.Number, t.Letter, t.Invisible }, defs, scale))
+            {
+                EventHandler take = delegate
+                {
+                    colorNumbersOn = d.IsOn(ColorSettingsDialog.Number);
+                    colorLettersOn = d.IsOn(ColorSettingsDialog.Letter);
+                    symbolColorOn = d.IsOn(ColorSettingsDialog.Symbol);
+                    t.Number = d.ColorOf(ColorSettingsDialog.Number);
+                    t.Letter = d.ColorOf(ColorSettingsDialog.Letter);
+                    t.Invisible = d.ColorOf(ColorSettingsDialog.Symbol);
+                    ApplyNumberLetterColors();
+                };
+                d.ValuesChanged += take;
+                if (d.ShowDialog(this) == DialogResult.OK)
+                {
+                    take(d, EventArgs.Empty);
+                    SaveSettings();
+                }
+                else
+                {
+                    colorNumbersOn = oldNumOn; colorLettersOn = oldLetOn; symbolColorOn = oldSymOn;
+                    t.Number = oldNum; t.Letter = oldLet; t.Invisible = oldSym;
+                    ApplyNumberLetterColors();
+                }
+            }
+        }
+
+        void ApplyNumberLetterColors()
+        {
+            numberColor = CurTheme.Number;
+            letterColor = CurTheme.Letter;
+            editor.InvisibleColor = symbolColorOn ? CurTheme.Invisible : CurTheme.Fore;
+            needPaint = true;
+            // 表示中の範囲をすぐに塗り直す(ダイアログ表示中もエディタで確認できるように)
+            if (editor.IsHandleCreated)
+            {
+                editor.PaintHighlights(hlStarts, hlLens, HighlightColor, colorNumbersOn, numberColor, colorLettersOn, letterColor);
+                needPaint = false;
+                lastScroll = editor.ScrollPos;
+                editor.Update();
+            }
+        }
+
+        // ======================= 拡張子の変更 =======================
+
+        /// <summary>開いているファイルの拡張子を変更する(ディスク上のファイル名を変更。内容と未保存の変更はそのまま)</summary>
+        void ChangeExtension()
+        {
+            if (filePath == null)
+            {
+                if (MessageBox.Show(this, "まだ保存されていないファイルです。名前を付けて保存しますか?", AppName,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes) SaveAs();
+                return;
+            }
+            string curExt = (Path.GetExtension(filePath) ?? "").TrimStart('.');
+            string newExt;
+            using (ExtensionDialog d = new ExtensionDialog(Path.GetFileName(filePath), curExt, scale))
+            {
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                newExt = d.Extension;
+            }
+            string dir = Path.GetDirectoryName(filePath);
+            string newPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(filePath) + (newExt.Length > 0 ? "." + newExt : ""));
+            if (string.Equals(newPath, filePath, StringComparison.Ordinal)) return;
+            bool caseOnly = string.Equals(newPath, filePath, StringComparison.OrdinalIgnoreCase);
+            if (!caseOnly && File.Exists(newPath))
+            {
+                MessageBox.Show(this, "同じ名前のファイルがすでにあります:\n" + newPath, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string oldPath = filePath;
+            try
+            {
+                if (File.Exists(oldPath))
+                {
+                    if (caseOnly)
+                    {
+                        // 大文字小文字だけの変更は一時名を経由する
+                        string tmp = oldPath + "." + Guid.NewGuid().ToString("N").Substring(0, 6) + ".tmp";
+                        File.Move(oldPath, tmp);
+                        File.Move(tmp, newPath);
+                    }
+                    else File.Move(oldPath, newPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "拡張子を変更できませんでした。\n" + ex.Message, AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            filePath = Path.GetFullPath(newPath);
+            // 履歴・ブックマークを新しい名前に引き継ぐ
+            mru.RemoveAll(delegate (string p) { return string.Equals(p, oldPath, StringComparison.OrdinalIgnoreCase); });
+            settings.Remove(BookmarkKeyFor(oldPath));
+            PersistBookmarks(filePath);
+            AddToMru(filePath);
+            UpdateTitle(true);
+            bool wasMd = IsMarkdownPath(oldPath), isMd = IsMarkdownPath(filePath);
+            if (wasMd != isMd) SetPreview(isMd);
+            Msg("拡張子を変更しました: " + Path.GetFileName(filePath));
+        }
+
         static bool IsJapaneseName(string n)
         {
             foreach (char c in n) if (c >= 0x3000) return true;
@@ -510,9 +624,9 @@ namespace Okaed
                 editor.InvisibleColor = symbolColorOn ? t.Invisible : t.Fore;
             }
             if (miThemeLight != null) { miThemeLight.Checked = !darkMode; miThemeDark.Checked = darkMode; }
-            if (miSymbolColorOn != null) miSymbolColorOn.Checked = symbolColorOn;
             needPaint = true;
             if (editor != null) editor.Invalidate();
+            if (bmGutter != null) bmGutter.Invalidate();
         }
 
         void InsertDate()
@@ -674,6 +788,7 @@ namespace Okaed
                     eol = e;
                     metaDirty = true;
                     editor.LoadText(text);
+                    ClearBookmarks();
                     ResetAutosaveIdentity();
                     UpdateEncUi();
                     UpdateTitle(true);
@@ -708,9 +823,6 @@ namespace Okaed
             colorNumbersOn = settings.GetBool("ColorNumbersOn", true);
             colorLettersOn = settings.GetBool("ColorLettersOn", true);
             symbolColorOn = settings.GetBool("SymbolColorOn", true);
-            miNumColorOn.Checked = colorNumbersOn;
-            miLetterColorOn.Checked = colorLettersOn;
-            miSymbolColorOn.Checked = symbolColorOn;
 
             // テーマ(ライト/ダーク)ごとの色。旧バージョンの単一の NumberColor/LetterColor があれば
             // ライトテーマの初期値として引き継ぐ。
@@ -806,6 +918,7 @@ namespace Okaed
             if (editor.Font.Name == name && Math.Abs(editor.Font.Size - size) < 0.01f) return;
             editor.SetEditorFont(new Font(name, size));
             needPaint = true;
+            if (bmGutter != null) bmGutter.Invalidate();
             if (web != null && split != null && !split.Panel2Collapsed) NavigateTemplate();
         }
 
@@ -813,6 +926,7 @@ namespace Okaed
         {
             editor.WrapEnabled = on;
             needPaint = true;
+            if (bmGutter != null) bmGutter.Invalidate();
         }
 
         // ======================= ファイル =======================
@@ -824,6 +938,7 @@ namespace Okaed
             eol = "\r\n";
             metaDirty = false;
             editor.LoadText("");
+            ClearBookmarks();
             lastHtml = null;
             ResetAutosaveIdentity();
             UpdateEncUi();
@@ -867,6 +982,7 @@ namespace Okaed
                 eol = e;
                 metaDirty = note != null;
                 editor.LoadText(text);
+                LoadBookmarksFor(filePath);
                 lastHtml = null;
                 ResetAutosaveIdentity();
                 UpdateEncUi();
@@ -941,6 +1057,7 @@ namespace Okaed
             try
             {
                 TextFile.Save(path, text, fileEnc, eol);
+                PersistBookmarks(Path.GetFullPath(path));
                 editor.MarkSaved();
                 metaDirty = false;
                 UpdateTitle(true);
@@ -1045,6 +1162,7 @@ namespace Okaed
             if (!split.Panel2Collapsed) { tmrPreview.Stop(); tmrPreview.Start(); }
             UpdateTitle(false);
             UpdatePos();
+            if (bmGutter != null && bmGutter.Visible) bmGutter.Invalidate();
         }
 
         void UpdatePos()
@@ -1060,24 +1178,38 @@ namespace Okaed
 
         void Msg(string s) { lblMsg.Text = s; }
 
+        int lastScrollTick;
+        bool scrollPaintPending;
+        const int ScrollSettleMs = 150;   // スクロールが止まってから着色し直すまでの待ち時間
+
         void Poll()
         {
             UpdateTitle(false);
             EditorBox.POINT sp = editor.ScrollPos;
             Size cs = editor.ClientSize;
             bool moved = sp.X != lastScroll.X || sp.Y != lastScroll.Y || cs != lastClient;
-            if (moved || needPaint)
+            if (moved)
+            {
+                // スクロール中は重い着色処理をせず、止まってからまとめて 1 回だけ行う
+                lastScroll = sp;
+                lastClient = cs;
+                lastScrollTick = Environment.TickCount;
+                scrollPaintPending = true;
+                SyncPreviewScroll();
+                if (bmGutter.Visible) bmGutter.Invalidate();
+            }
+            bool settled = unchecked(Environment.TickCount - lastScrollTick) >= ScrollSettleMs;
+            if ((needPaint || scrollPaintPending) && settled)
             {
                 if (editor.CanPaintNow)
                 {
                     editor.PaintHighlights(hlStarts, hlLens, HighlightColor, colorNumbersOn, numberColor, colorLettersOn, letterColor);
                     needPaint = false;
+                    scrollPaintPending = false;
                     lastScroll = editor.ScrollPos;
-                    lastClient = cs;
+                    lastClient = editor.ClientSize;
                 }
-                else needPaint = true;
             }
-            if (moved) SyncPreviewScroll();
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -1329,6 +1461,7 @@ namespace Okaed
             }
             if (web == null)
             {
+                EnableColorEmojiInPreview();
                 web = new WebBrowser();
                 web.Dock = DockStyle.Fill;
                 web.ScriptErrorsSuppressed = true;
@@ -1445,11 +1578,34 @@ namespace Okaed
             catch { }
         }
 
+        /// <summary>
+        /// WebBrowser(IE)コントロールは既定でソフトウェア描画のため、カラー絵文字が白黒になる。
+        /// このアプリ(exe)に限って GPU 描画を有効にする(HKCU のみ・管理者権限不要。MSIX ではパッケージ内に仮想化される)。
+        /// </summary>
+        static void EnableColorEmojiInPreview()
+        {
+            try
+            {
+                string exe = Path.GetFileName(Application.ExecutablePath);
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                    @"Software\Microsoft\Internet Explorer\Main\FeatureControl\FEATURE_GPU_RENDERING"))
+                {
+                    if (k != null) k.SetValue(exe, 1, Microsoft.Win32.RegistryValueKind.DWord);
+                }
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                    @"Software\Microsoft\Internet Explorer\Main\FeatureControl\FEATURE_BROWSER_EMULATION"))
+                {
+                    if (k != null && k.GetValue(exe) == null) k.SetValue(exe, 11001, Microsoft.Win32.RegistryValueKind.DWord);
+                }
+            }
+            catch { }
+        }
+
         static string PreviewCss(float bodyFontPx)
         {
             return
             "html{background:#fff}" +
-            "body{font-family:'Yu Gothic UI','Meiryo UI','Meiryo',sans-serif;font-size:" + bodyFontPx.ToString("0.##", CultureInfo.InvariantCulture) + "px;line-height:1.7;color:#1f2328;margin:0;padding:16px 24px 40px;word-wrap:break-word}" +
+            "body{font-family:'Yu Gothic UI','Meiryo UI','Meiryo','Segoe UI Emoji',sans-serif;font-size:" + bodyFontPx.ToString("0.##", CultureInfo.InvariantCulture) + "px;line-height:1.7;color:#1f2328;margin:0;padding:16px 24px 40px;word-wrap:break-word}" +
             "h1,h2,h3,h4,h5,h6{margin:1.2em 0 .5em;line-height:1.3;font-weight:600}" +
             "h1{font-size:1.9em;border-bottom:1px solid #d8dee4;padding-bottom:.25em}" +
             "h2{font-size:1.5em;border-bottom:1px solid #d8dee4;padding-bottom:.25em}" +
@@ -1457,7 +1613,7 @@ namespace Okaed
             "p,ul,ol,blockquote,pre,table{margin:0 0 1em}" +
             "ul,ol{padding-left:2em}li{margin:.2em 0}li.task{list-style:none;margin-left:-1.4em}" +
             "a{color:#0969da;text-decoration:none}a:hover{text-decoration:underline}" +
-            "code{font-family:'BIZ UDGothic','MS Gothic',Consolas,monospace;font-size:.9em;background:#eff1f3;padding:.15em .35em;border-radius:4px}" +
+            "code{font-family:'BIZ UDGothic','MS Gothic',Consolas,'Segoe UI Emoji',monospace;font-size:.9em;background:#eff1f3;padding:.15em .35em;border-radius:4px}" +
             "pre{background:#f6f8fa;padding:12px 14px;overflow:auto;border-radius:6px;line-height:1.5}" +
             "pre code{background:none;padding:0;font-size:.88em}" +
             "blockquote{margin-left:0;padding:0 1em;color:#59636e;border-left:4px solid #d0d7de}" +

@@ -23,6 +23,11 @@ namespace Okaed
         [DllImport("user32.dll")]
         static extern bool GetScrollInfo(IntPtr h, int bar, ref SCROLLINFO si);
 
+        [DllImport("user32.dll")]
+        static extern bool GetUpdateRect(IntPtr h, ref RECT r, bool erase);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct RECT { public int Left, Top, Right, Bottom; }
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT { public int X; public int Y; }
         [StructLayout(LayoutKind.Sequential)]
@@ -74,6 +79,11 @@ namespace Okaed
 
         bool showInvisibles;
         bool invisiblesPending;
+        Rectangle invisDirty = Rectangle.Empty;
+        // 空白可視化の計測値キャッシュ(フォントが変わったら作り直す)
+        Font invisMetricsFont;
+        float cacheHalfW, cacheFullW, cacheAscentRatio;
+        SizeF cacheTabGlyph, cacheNlGlyph;
         Font invisFont;
         Color invisibleColor = Color.FromArgb(70, 140, 210);
         Brush invisBrush = new SolidBrush(Color.FromArgb(220, 70, 140, 210));
@@ -94,6 +104,19 @@ namespace Okaed
 
         /// <summary>本文エリアでのトリプルクリックで発生(ウィンドウサイズのリセットなどに利用)</summary>
         public event EventHandler TripleClick;
+
+        /// <summary>本文が変更されたとき(位置・削除された文字列・挿入された文字列、改行は "\n")。ブックマークの行追従に使う</summary>
+        public delegate void EditedHandler(int pos, string removed, string inserted);
+        public event EditedHandler Edited;
+
+        /// <summary>Ctrl+1～Ctrl+9 が押されたとき(引数は 1～9)</summary>
+        public event Action<int> BookmarkKey;
+
+        void RaiseEdited(int pos, string removed, string inserted)
+        {
+            EditedHandler h = Edited;
+            if (h != null) h(pos, removed, inserted);
+        }
         int leftClickCount;
         int lastLeftClickTick;
         Point lastLeftClickPos = new Point(int.MinValue, int.MinValue);
@@ -224,6 +247,16 @@ namespace Okaed
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == WM_IME_STARTCOMPOSITION) composing = true;
+            if (m.Msg == WM_PAINT && showInvisibles)
+            {
+                // RichEdit がこれから描き直す範囲を覚えておき、空白記号はその範囲だけ描く
+                RECT ur = new RECT();
+                if (GetUpdateRect(Handle, ref ur, false))
+                {
+                    Rectangle r = Rectangle.FromLTRB(ur.Left, ur.Top, ur.Right, ur.Bottom);
+                    invisDirty = invisDirty.IsEmpty ? r : Rectangle.Union(invisDirty, r);
+                }
+            }
             if (m.Msg == WM_LBUTTONDOWN || m.Msg == WM_LBUTTONDBLCLK) TrackLeftClickForTripleClick(m.LParam);
             base.WndProc(ref m);
             if (m.Msg == WM_IME_ENDCOMPOSITION)
@@ -244,7 +277,9 @@ namespace Okaed
                 BeginInvoke(new MethodInvoker(delegate
                 {
                     invisiblesPending = false;
-                    if (!IsDisposed && showInvisibles && !composing) DrawInvisibles();
+                    Rectangle clip = invisDirty;
+                    invisDirty = Rectangle.Empty;
+                    if (!IsDisposed && showInvisibles && !composing && !clip.IsEmpty) DrawInvisibles(clip);
                 }));
             }
         }
@@ -305,17 +340,22 @@ namespace Okaed
             return Font.Height * dpiScale;
         }
 
-        void DrawInvisibles()
+        void DrawInvisibles(Rectangle clip)
         {
             if (!IsHandleCreated) return;
             string text = shadow;
             if (text.Length == 0) return;
             Rectangle client = ClientRectangle;
-            int first = GetCharIndexFromPosition(new Point(0, 0));
-            int last = GetCharIndexFromPosition(new Point(Math.Max(0, client.Width - 1), Math.Max(0, client.Height - 1)));
+            clip.Intersect(client);
+            if (clip.IsEmpty) return;
+            // 描き直された範囲(スクロール時は新しく見えた帯だけ)に含まれる文字だけを処理する
+            int first = GetCharIndexFromPosition(new Point(0, Math.Max(0, clip.Top)));
+            int last = GetCharIndexFromPosition(new Point(Math.Max(0, client.Width - 1), Math.Max(0, clip.Bottom - 1)));
             first = Math.Max(0, Math.Min(first, text.Length - 1));
+            if (first > 0) first = text.LastIndexOf('\n', first - 1) + 1;   // 行頭から
             last = Math.Max(first, Math.Min(last + 1, text.Length));
-            if (invisFont == null || Math.Abs(invisFont.Size - Font.Size * 0.85f) > 0.5f)
+            if (last < text.Length) { int nl = text.IndexOf('\n', last); last = nl < 0 ? text.Length : Math.Min(text.Length, nl + 1); }
+            if (invisFont == null || Math.Abs(invisFont.Size - Math.Max(8f, Font.Size * 0.85f)) > 0.01f)
             {
                 if (invisFont != null) invisFont.Dispose();
                 invisFont = new Font(Font.FontFamily, Math.Max(8f, Font.Size * 0.85f), FontStyle.Bold);
@@ -326,38 +366,37 @@ namespace Okaed
                 using (Pen dotPen = new Pen(Color.FromArgb(200, invisibleColor), 1.4f))
                 {
                     dotPen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dot;
-                    g.SetClip(client);
+                    g.SetClip(clip);
                     g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
                     float dpiScale = g.DpiY / 96f;
 
-                    int cachedLine = -1;
-                    float lineH = Font.Height * dpiScale;
-
-                    // 指定フォントの「キャップハイト(大文字の高さ)〜ベースライン」に相当する
-                    // 行内の比率。GDI+ には正確なキャップハイトの取得手段が無いため、
-                    // フォントの cell ascent(行頭からベースラインまで)を実測した行の高さに
-                    // あてはめて近似する。
-                    float ascentRatio = 0.8f;
-                    try
+                    // フォント依存の計測値はフォントが変わったときだけ求める(毎回の計測が重かったため)
+                    if (!ReferenceEquals(invisMetricsFont, Font))
                     {
-                        FontFamily fam = Font.FontFamily;
-                        FontStyle fstyle = Font.Style;
-                        float lineSpacingUnits = fam.GetLineSpacing(fstyle);
-                        float ascentUnits = fam.GetCellAscent(fstyle);
-                        if (lineSpacingUnits > 0) ascentRatio = ascentUnits / lineSpacingUnits;
+                        invisMetricsFont = Font;
+                        cacheAscentRatio = 0.8f;
+                        try
+                        {
+                            FontFamily fam = Font.FontFamily;
+                            float lineSpacingUnits = fam.GetLineSpacing(Font.Style);
+                            if (lineSpacingUnits > 0) cacheAscentRatio = fam.GetCellAscent(Font.Style) / lineSpacingUnits;
+                        }
+                        catch { }
+                        Size big = new Size(short.MaxValue, short.MaxValue);
+                        float mm = TextRenderer.MeasureText(g, "MM", Font, big, TextFormatFlags.NoPadding).Width;
+                        cacheHalfW = TextRenderer.MeasureText(g, "M M", Font, big, TextFormatFlags.NoPadding).Width - mm;
+                        if (cacheHalfW < 2f) cacheHalfW = Font.Height * 0.5f;
+                        cacheFullW = TextRenderer.MeasureText(g, "M\u3000M", Font, big, TextFormatFlags.NoPadding).Width - mm;
+                        if (cacheFullW < cacheHalfW) cacheFullW = cacheHalfW * 2;
+                        cacheTabGlyph = g.MeasureString("→", invisFont);
+                        cacheNlGlyph = g.MeasureString("↵", invisFont);
                     }
-                    catch { }
-
-                    // 次(または前)の文字位置から実測できない場合に使う、実フォント計測によるフォールバック幅
-                    // (行の高さからの推定は等幅フォントでない場合などに誤差が大きく、
-                    //  入力直後(次の文字がまだ無い)に幅が過大になる原因だったため、実測値に変更)
-                    float fallbackHalf = TextRenderer.MeasureText(g, "M M", Font, new Size(short.MaxValue, short.MaxValue), TextFormatFlags.NoPadding).Width
-                                       - TextRenderer.MeasureText(g, "MM", Font, new Size(short.MaxValue, short.MaxValue), TextFormatFlags.NoPadding).Width;
-                    if (fallbackHalf < 2f) fallbackHalf = lineH * 0.5f;
-                    float fallbackFull = TextRenderer.MeasureText(g, "M　M", Font, new Size(short.MaxValue, short.MaxValue), TextFormatFlags.NoPadding).Width
-                                       - TextRenderer.MeasureText(g, "MM", Font, new Size(short.MaxValue, short.MaxValue), TextFormatFlags.NoPadding).Width;
-                    if (fallbackFull < fallbackHalf) fallbackFull = fallbackHalf * 2;
+                    float ascentRatio = cacheAscentRatio;
+                    float fallbackHalf = cacheHalfW, fallbackFull = cacheFullW;
+                    // 行の高さは全行共通(単一フォント)なので 1 回だけ実測する
+                    float lineH = MeasureLineHeight(first, text, dpiScale);
+                    int reuseIdx = -1; Point reusePt = Point.Empty;
 
                     for (int i = first; i < last; i++)
                     {
@@ -371,15 +410,9 @@ namespace Okaed
                             else continue;
                         }
 
-                        Point p0 = GetPositionFromCharIndex(i);
+                        Point p0 = i == reuseIdx ? reusePt : GetPositionFromCharIndex(i);
                         if (p0.X < -20 || p0.Y < -20 || p0.X > client.Width + 20 || p0.Y > client.Height + 20) continue;
 
-                        int curLine = GetLineFromCharIndex(i);
-                        if (curLine != cachedLine)
-                        {
-                            cachedLine = curLine;
-                            lineH = MeasureLineHeight(i, text, dpiScale);
-                        }
                         float cy = p0.Y + lineH / 2f;
 
                         if (isSpace)
@@ -388,6 +421,7 @@ namespace Okaed
                             if (i + 1 < text.Length)
                             {
                                 Point p1 = GetPositionFromCharIndex(i + 1);
+                                reuseIdx = i + 1; reusePt = p1;   // 連続する空白では次の文字の位置を再利用
                                 if (p1.Y == p0.Y && p1.X > p0.X) cellW = p1.X - p0.X;
                             }
                             else if (i > 0)
@@ -417,7 +451,7 @@ namespace Okaed
                             continue;
                         }
 
-                        SizeF sz = g.MeasureString(glyph, invisFont);
+                        SizeF sz = c == '\t' ? cacheTabGlyph : cacheNlGlyph;
                         g.DrawString(glyph, invisFont, invisBrush, p0.X, cy - sz.Height / 2f);
                     }
                 }
@@ -441,6 +475,7 @@ namespace Okaed
             string inserted = now.Substring(p, now.Length - p - s);
             shadow = now;
             redo.Clear();
+            RaiseEdited(p, removed, inserted);
 
             DateTime t = DateTime.Now;
             Edit top = undo.Count > 0 ? undo[undo.Count - 1] : null;
@@ -472,6 +507,7 @@ namespace Okaed
 
         void ApplyReplace(int pos, int len, string text)
         {
+            string removed = pos >= 0 && pos + len <= shadow.Length ? shadow.Substring(pos, len) : "";
             suppress++;
             try
             {
@@ -480,6 +516,7 @@ namespace Okaed
                 shadow = ReadText();
             }
             finally { suppress--; }
+            RaiseEdited(pos, removed, text);
         }
 
         public void DoUndo()
@@ -584,8 +621,23 @@ namespace Okaed
 
         protected override bool ProcessCmdKey(ref Message m, Keys keyData)
         {
+            // インスタントブックマーク: Ctrl+1～Ctrl+9(テンキーも可)
+            Keys kc = keyData & Keys.KeyCode;
+            if ((keyData & Keys.Modifiers) == Keys.Control)
+            {
+                int n = 0;
+                if (kc >= Keys.D1 && kc <= Keys.D9) n = kc - Keys.D0;
+                else if (kc >= Keys.NumPad1 && kc <= Keys.NumPad9) n = kc - Keys.NumPad0;
+                if (n > 0)
+                {
+                    if (!composing) { Action<int> h = BookmarkKey; if (h != null) h(n); }
+                    return true;
+                }
+            }
             switch (keyData)
             {
+                case Keys.Control | Keys.A:
+                    SelectAll(); return true;
                 case Keys.Control | Keys.Z:
                     DoUndo(); return true;
                 case Keys.Control | Keys.Y:

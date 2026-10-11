@@ -1,0 +1,37 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" IgnorableNamespaces="uap uap10 rescap">
+  <!--Package created by MSIX Packaging Tool version: 1.2024.405.0-->
+  <Identity Name="onboardjapan.Okaed" Publisher="CN=DB1613D0-8D9C-4961-B289-990973A94308" Version="1.0.1.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Okaed</DisplayName>
+    <PublisherDisplayName>onboard_japan</PublisherDisplayName>
+    <Description>シンプルなテキストエディタ</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <uap10:PackageIntegrity>
+      <uap10:Content Enforcement="on" />
+    </uap10:PackageIntegrity>
+  </Properties>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22000.1" />
+  </Dependencies>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+<Applications><Application Id="OKAED" Executable="VFS\ProgramFilesX64\Okaed\Okaed.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements BackgroundColor="transparent" DisplayName="Okaed" Square150x150Logo="Assets\OKAED-Square150x150Logo.png" Square44x44Logo="Assets\OKAED-Square44x44Logo.png" Description="Okaed"><uap:DefaultTile Wide310x150Logo="Assets\OKAED-Wide310x150Logo.png" Square310x310Logo="Assets\OKAED-Square310x310Logo.png" Square71x71Logo="Assets\OKAED-Square71x71Logo.png" /></uap:VisualElements>
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="okaedtext">
+            <uap:DisplayName>Okaed テキスト</uap:DisplayName>
+            <uap:Logo>Assets\OKAED-Square44x44Logo.png</uap:Logo>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.txt</uap:FileType>
+              <uap:FileType>.md</uap:FileType>
+              <uap:FileType>.log</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application></Applications></Package>
