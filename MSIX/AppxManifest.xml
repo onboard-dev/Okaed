@@ -30,6 +30,9 @@
               <uap:FileType>.txt</uap:FileType>
               <uap:FileType>.md</uap:FileType>
               <uap:FileType>.log</uap:FileType>
+              <uap:FileType>.ini</uap:FileType>
+              <uap:FileType>.csv</uap:FileType>
+              <uap:FileType>.xml</uap:FileType>
             </uap:SupportedFileTypes>
           </uap:FileTypeAssociation>
         </uap:Extension>
