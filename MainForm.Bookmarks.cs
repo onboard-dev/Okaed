@@ -21,22 +21,26 @@ namespace Okaed
         const string BookmarkKeyPrefix = "Bookmark.";
         const int BookmarkCount = 9;
 
-        readonly int[] bmLines = new int[BookmarkCount + 1];    // [1]～[9]: 論理行(0始まり)、-1 は未設定
+        // 各文書のブックマーク行(論理行・0始まり、-1 は未設定)は Doc.BmLines にある(bmLines は表示中の文書の分)
         readonly int[] bmStarts = new int[BookmarkCount + 1];   // 各ブックマーク行の先頭文字位置(キャッシュ)
         bool bmStartsValid;
         BookmarkGutter bmGutter;
 
         void InitBookmarks()
         {
-            for (int i = 0; i <= BookmarkCount; i++) bmLines[i] = -1;
             bmGutter = new BookmarkGutter(this);
             bmGutter.Dock = DockStyle.Left;
             bmGutter.Width = S(26);
             bmGutter.Visible = false;
-            editor.BookmarkKey += OnBookmarkKey;
-            editor.Edited += OnEditedForBookmarks;
-            editor.VScroll += delegate { if (bmGutter.Visible) bmGutter.Invalidate(); };
-            editor.Resize += delegate { bmStartsValid = false; if (bmGutter.Visible) bmGutter.Invalidate(); };
+        }
+
+        /// <summary>エディタ(タブごとに 1 つ)のイベントをブックマーク処理に結びつける</summary>
+        void WireBookmarkEvents(EditorBox ed)
+        {
+            ed.BookmarkKey += OnBookmarkKey;
+            ed.Edited += OnEditedForBookmarks;
+            ed.VScroll += delegate { if (bmGutter.Visible) bmGutter.Invalidate(); };
+            ed.Resize += delegate { bmStartsValid = false; if (bmGutter.Visible) bmGutter.Invalidate(); };
         }
 
         bool HasBookmarks
@@ -44,10 +48,12 @@ namespace Okaed
             get { for (int n = 1; n <= BookmarkCount; n++) if (bmLines[n] >= 0) return true; return false; }
         }
 
+        /// <summary>開いているすべてのタブのブックマークの数</summary>
         int CountBookmarks()
         {
             int c = 0;
-            for (int n = 1; n <= BookmarkCount; n++) if (bmLines[n] >= 0) c++;
+            foreach (Doc d in docs)
+                for (int n = 1; n <= BookmarkCount; n++) if (d.BmLines[n] >= 0) c++;
             return c;
         }
 
@@ -248,7 +254,9 @@ namespace Okaed
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
             foreach (string k in keys) settings.Remove(k);
             settings.Save();
-            ClearBookmarks();
+            foreach (Doc d in docs)
+                for (int n = 1; n <= BookmarkCount; n++) d.BmLines[n] = -1;
+            BookmarksChanged();
             Msg("すべてのブックマークを削除しました");
         }
 

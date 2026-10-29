@@ -22,6 +22,8 @@ Claude outputs/
 claude/
 .claude/
 CLAUDE.md
+HANDOFF.md
+AGENTS.md
 icon/__pycache__/
 icon/*.png
 *.pyc

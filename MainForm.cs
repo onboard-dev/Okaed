@@ -37,8 +37,9 @@ namespace Okaed
         readonly Settings settings = new Settings();
         float scale = 1f;
 
-        EditorBox editor;
         SplitContainer split;
+        TabBar tabBar;
+        ContextMenuStrip editorMenu;
         WebBrowser web;
         ToolStrip tool;
         MenuStrip menu;
@@ -93,14 +94,8 @@ namespace Okaed
         const int MruMax = 30;
 
         // ---- 自動保存(テンポラリフォルダへの複製のみ。保存先の実ファイルには触れない) ----
-        string autosavePath;
-        string autosaveLastText;
         static readonly string AutosaveDir = Path.Combine(Path.GetTempPath(), "Okaed", "autosave");
 
-        string filePath;
-        FileEnc fileEnc = FileEnc.Utf8Bom;
-        string eol = "\r\n";
-        bool metaDirty;          // 文字コード/改行の変更
         bool lastDirtyShown = true;
 
         readonly List<int> hlStarts = new List<int>();
@@ -119,7 +114,7 @@ namespace Okaed
 
         readonly HashSet<string> fontNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        public MainForm(string openPath)
+        public MainForm(string[] openPaths)
         {
             using (Graphics g = CreateGraphics()) scale = g.DpiX / 96f;
             Text = AppTitleWithVersion;
@@ -141,10 +136,15 @@ namespace Okaed
             tmrAutosave.Tick += delegate { WriteAutosave(); };
             tmrAutosave.Start();
 
-            if (!string.IsNullOrEmpty(openPath) && File.Exists(openPath)) OpenFile(openPath);
-            else NewFile();
+            NewFile();   // 最初のタブを空の文書として初期化
+            if (openPaths != null)
+                foreach (string p in openPaths)
+                    if (!string.IsNullOrEmpty(p) && File.Exists(p)) OpenFile(p);
 
-            OfferAutosaveRecovery();
+            // ほかの Okaed のウィンドウが開いているときは、その作業中の自動保存ファイルなので復元を勧めない
+            bool otherWindow = SingleInstance.OtherWindowExists();
+            SingleInstance.Register(Handle);
+            if (!otherWindow) OfferAutosaveRecovery();
         }
 
         int S(int px) { return (int)Math.Round(px * scale); }
@@ -154,6 +154,7 @@ namespace Okaed
             base.OnHandleCreated(e);
             try { hotkeyRegistered = RegisterHotKey(Handle, HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_O); }
             catch { hotkeyRegistered = false; }
+            SingleInstance.OnHandleCreated(Handle);
         }
 
         protected override void WndProc(ref Message m)
@@ -163,6 +164,7 @@ namespace Okaed
                 RestoreFromTray();
                 return;
             }
+            if (HandleRemoteOpen(ref m)) return;
             base.WndProc(ref m);
         }
 
@@ -170,35 +172,36 @@ namespace Okaed
 
         void BuildUi()
         {
-            // ---- エディタとプレビュー ----
-            editor = new EditorBox();
-            editor.Dock = DockStyle.Fill;
-            editor.AllowDrop = true;
-            editor.TextChanged += delegate { OnEditorTextChanged(); };
-            editor.SelectionChanged += delegate { UpdatePos(); };
-            editor.DragEnter += OnDragEnter;
-            editor.DragDrop += OnDragDrop;
-            editor.ContextMenuStrip = BuildContextMenu();
-            editor.TripleClick += delegate { ResetWindowToDefaultSize(); };
+            // ---- エディタとプレビュー(エディタは文書=タブごとに 1 つ。CreateDoc で作る)----
+            editorMenu = BuildContextMenu();
             InitBookmarks();
+            InitTabs();
 
             split = new SplitContainer();
             split.Dock = DockStyle.Fill;
             split.Orientation = Orientation.Vertical;
             split.Panel2Collapsed = true;
             split.SplitterWidth = S(5);
-            split.Panel1.Controls.Add(editor);
             split.Panel1.Controls.Add(bmGutter);   // 後に追加した方が外側(左端)に配置される
             split.SplitterMoved += delegate { if (!split.Panel2Collapsed) settings.Set("SplitRatio", (float)split.SplitterDistance / Math.Max(1, split.Width)); };
 
             // ---- メニュー(ファイル操作など最小限)----
             menu = new MenuStrip();
             ToolStripMenuItem mFile = new ToolStripMenuItem("ファイル(&F)");
-            mFile.DropDownItems.Add(MI("新規(&N)", Keys.Control | Keys.N, delegate { if (ConfirmDiscard()) NewFile(); }));
+            mFile.DropDownItems.Add(MI("新規(&N)", Keys.Control | Keys.N, delegate { NewTab(); }));
             mFile.DropDownItems.Add(MI("開く(&O)...", Keys.Control | Keys.O, delegate { OpenDialog(); }));
+            mFile.DropDownItems.Add(MI("新しいウィンドウ(&I)", Keys.Control | Keys.Shift | Keys.N, delegate { OpenNewWindow(); }));
             mFile.DropDownItems.Add(MI("上書き保存(&S)", Keys.Control | Keys.S, delegate { Save(); }));
             mFile.DropDownItems.Add(MI("名前を付けて保存(&A)...", Keys.Control | Keys.Shift | Keys.S, delegate { SaveAs(); }));
             mFile.DropDownItems.Add(MI("拡張子の変更(&E)...", Keys.None, delegate { ChangeExtension(); }));
+            mFile.DropDownItems.Add(new ToolStripSeparator());
+            mFile.DropDownItems.Add(MI("タブを閉じる(&W)", Keys.Control | Keys.W, delegate { CloseDoc(cur); }));
+            ToolStripMenuItem miNextTab = MI("次のタブ", Keys.None, delegate { SelectNextTab(1); });
+            miNextTab.ShortcutKeyDisplayString = "Ctrl+Tab";
+            ToolStripMenuItem miPrevTab = MI("前のタブ", Keys.None, delegate { SelectNextTab(-1); });
+            miPrevTab.ShortcutKeyDisplayString = "Ctrl+Shift+Tab";
+            mFile.DropDownItems.Add(miNextTab);
+            mFile.DropDownItems.Add(miPrevTab);
             mFile.DropDownItems.Add(new ToolStripSeparator());
             mRecent = new ToolStripMenuItem("最近使ったファイル(&R)");
             mFile.DropDownItems.Add(mRecent);
@@ -376,10 +379,12 @@ namespace Okaed
 
             // Dock は後に追加したものが外側
             Controls.Add(split);
+            Controls.Add(tabBar);
             Controls.Add(status);
             Controls.Add(tool);
             Controls.Add(menu);
             MainMenuStrip = menu;
+            InitFirstDoc();
 
             AllowDrop = true;
             DragEnter += OnDragEnter;
@@ -431,7 +436,7 @@ namespace Okaed
         {
             numberColor = CurTheme.Number;
             letterColor = CurTheme.Letter;
-            editor.InvisibleColor = symbolColorOn ? CurTheme.Invisible : CurTheme.Fore;
+            foreach (Doc d in docs) d.Editor.InvisibleColor = symbolColorOn ? CurTheme.Invisible : CurTheme.Fore;
             needPaint = true;
             // 表示中の範囲をすぐに塗り直す(ダイアログ表示中もエディタで確認できるように)
             if (editor.IsHandleCreated)
@@ -601,7 +606,7 @@ namespace Okaed
 
         void SetInvisibles(bool on)
         {
-            editor.ShowInvisibles = on;
+            foreach (Doc d in docs) d.Editor.ShowInvisibles = on;
         }
 
         void SetDarkMode(bool dark)
@@ -617,15 +622,16 @@ namespace Okaed
             ThemeColors t = CurTheme;
             numberColor = t.Number;
             letterColor = t.Letter;
-            if (editor != null)
+            foreach (Doc d in docs)
             {
-                editor.BackColor = t.Back;
-                editor.ForeColor = t.Fore;
-                editor.InvisibleColor = symbolColorOn ? t.Invisible : t.Fore;
+                d.Editor.BackColor = t.Back;
+                d.Editor.ForeColor = t.Fore;
+                d.Editor.InvisibleColor = symbolColorOn ? t.Invisible : t.Fore;
             }
+            if (tabBar != null) tabBar.SetColors(t.Back, t.Fore);
             if (miThemeLight != null) { miThemeLight.Checked = !darkMode; miThemeDark.Checked = darkMode; }
             needPaint = true;
-            if (editor != null) editor.Invalidate();
+            foreach (Doc d in docs) d.Editor.Invalidate();
             if (bmGutter != null) bmGutter.Invalidate();
         }
 
@@ -711,7 +717,7 @@ namespace Okaed
                 RebuildMruMenu();
                 return;
             }
-            if (ConfirmDiscard()) OpenFile(path);
+            OpenFile(path);
         }
 
         // ======================= 自動保存(テンポラリフォルダへの複製) =======================
@@ -739,29 +745,35 @@ namespace Okaed
             autosaveLastText = null;
         }
 
+        /// <summary>開いているすべてのタブについて、変更があれば自動保存ファイルへ複製する</summary>
         void WriteAutosave()
         {
-            try
+            foreach (Doc d in docs)
             {
-                if (!editor.IsDirty) return;
-                if (autosavePath == null) return;
-                string text = editor.PlainText;
-                if (text == autosaveLastText) return;
-                if (text.Length == 0) return;
-                Directory.CreateDirectory(AutosaveDir);
-                TextFile.Save(autosavePath, text, fileEnc, eol);
-                autosaveLastText = text;
+                try
+                {
+                    if (!d.Editor.IsDirty) continue;
+                    if (d.AutosavePath == null) continue;
+                    string text = d.Editor.PlainText;
+                    if (text == d.AutosaveLastText) continue;
+                    if (text.Length == 0) continue;
+                    Directory.CreateDirectory(AutosaveDir);
+                    TextFile.Save(d.AutosavePath, text, d.Enc, d.Eol);
+                    d.AutosaveLastText = text;
+                }
+                catch { }
             }
-            catch { }
         }
 
-        void DeleteAutosaveFile()
+        void DeleteAutosaveFile() { DeleteAutosaveFile(cur); }
+
+        void DeleteAutosaveFile(Doc d)
         {
-            try { if (autosavePath != null && File.Exists(autosavePath)) File.Delete(autosavePath); } catch { }
-            autosavePath = null;
+            try { if (d.AutosavePath != null && File.Exists(d.AutosavePath)) File.Delete(d.AutosavePath); } catch { }
+            d.AutosavePath = null;
         }
 
-        /// <summary>前回セッションが異常終了して残っていた自動保存ファイルがあれば復元を提案する</summary>
+        /// <summary>前回セッションが異常終了して残っていた自動保存ファイルがあれば復元を提案する(1 ファイルにつき 1 タブ)</summary>
         void OfferAutosaveRecovery()
         {
             try
@@ -769,30 +781,41 @@ namespace Okaed
                 if (!Directory.Exists(AutosaveDir)) return;
                 string[] files = Directory.GetFiles(AutosaveDir, "*.txt");
                 if (files.Length == 0) return;
-                string newest = files[0];
-                DateTime newestTime = File.GetLastWriteTimeUtc(newest);
-                foreach (string f in files)
+                Array.Sort(files, delegate (string x, string y)
                 {
-                    DateTime t = File.GetLastWriteTimeUtc(f);
-                    if (t > newestTime) { newest = f; newestTime = t; }
-                }
+                    return File.GetLastWriteTimeUtc(x).CompareTo(File.GetLastWriteTimeUtc(y));
+                });
+                StringBuilder names = new StringBuilder();
+                for (int i = 0; i < files.Length && i < 5; i++) names.Append("  ").Append(Path.GetFileName(files[i])).Append('\n');
+                if (files.Length > 5) names.Append("  ほか ").Append(files.Length - 5).Append(" 件\n");
                 DialogResult r = MessageBox.Show(this,
-                    "前回のセッションで保存されなかった内容が見つかりました。\n(" + Path.GetFileName(newest) + ")\n\n復元しますか?",
+                    "前回のセッションで保存されなかった内容が見つかりました(" + files.Length + " 件)。\n" + names +
+                    "\n復元しますか?(1 件ずつ新しいタブで開きます)",
                     AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (r == DialogResult.Yes && ConfirmDiscard())
+                if (r == DialogResult.Yes)
                 {
-                    FileEnc enc; string e; string note;
-                    string text = TextFile.Load(newest, FileEnc.Utf8Bom, out enc, out e, out note);
-                    filePath = null;
-                    fileEnc = enc;
-                    eol = e;
-                    metaDirty = true;
-                    editor.LoadText(text);
-                    ClearBookmarks();
-                    ResetAutosaveIdentity();
-                    UpdateEncUi();
-                    UpdateTitle(true);
-                    Msg("前回の内容を復元しました。内容を確認して保存してください。");
+                    int restored = 0;
+                    foreach (string f in files)
+                    {
+                        try
+                        {
+                            FileEnc enc; string e; string note;
+                            string text = TextFile.Load(f, FileEnc.Utf8Bom, out enc, out e, out note);
+                            if (!IsPristineUntitled(cur)) AddDoc();
+                            filePath = null;
+                            fileEnc = enc;
+                            eol = e;
+                            metaDirty = true;
+                            editor.LoadText(text);
+                            ClearBookmarks();
+                            ResetAutosaveIdentity();
+                            UpdateEncUi();
+                            UpdateTitle(true);
+                            restored++;
+                        }
+                        catch { }
+                    }
+                    if (restored > 0) Msg("前回の内容を復元しました。内容を確認して保存してください。");
                 }
                 foreach (string f in files) { try { File.Delete(f); } catch { } }
             }
@@ -916,7 +939,8 @@ namespace Okaed
             if (!float.TryParse(cmbSize.Text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out size)) return;
             if (size < 4 || size > 200) return;
             if (editor.Font.Name == name && Math.Abs(editor.Font.Size - size) < 0.01f) return;
-            editor.SetEditorFont(new Font(name, size));
+            Font nf = new Font(name, size);
+            foreach (Doc d in docs) d.Editor.SetEditorFont(nf);
             needPaint = true;
             if (bmGutter != null) bmGutter.Invalidate();
             if (web != null && split != null && !split.Panel2Collapsed) NavigateTemplate();
@@ -924,7 +948,7 @@ namespace Okaed
 
         void SetWrap(bool on)
         {
-            editor.WrapEnabled = on;
+            foreach (Doc d in docs) d.Editor.WrapEnabled = on;
             needPaint = true;
             if (bmGutter != null) bmGutter.Invalidate();
         }
@@ -949,12 +973,13 @@ namespace Okaed
 
         void OpenDialog()
         {
-            if (!ConfirmDiscard()) return;
             using (OpenFileDialog d = new OpenFileDialog())
             {
                 d.Filter = "テキスト/Markdown (*.txt;*.md;*.markdown;*.csv;*.log;*.ini)|*.txt;*.md;*.markdown;*.csv;*.log;*.ini|すべてのファイル (*.*)|*.*";
+                d.Multiselect = true;
                 if (filePath != null) d.InitialDirectory = Path.GetDirectoryName(filePath);
-                if (d.ShowDialog(this) == DialogResult.OK) OpenFile(d.FileName);
+                if (d.ShowDialog(this) == DialogResult.OK)
+                    foreach (string f in d.FileNames) OpenFile(f);
             }
         }
 
@@ -962,6 +987,10 @@ namespace Okaed
         {
             try
             {
+                // すでに開いているファイルは、そのタブへ切り替えるだけ
+                Doc opened = FindDocByPath(Path.GetFullPath(path));
+                if (opened != null) { SwitchTo(opened); return; }
+
                 FileInfo fi = new FileInfo(path);
                 if (fi.Length > 200L * 1024 * 1024)
                 {
@@ -977,6 +1006,8 @@ namespace Okaed
                     text = text.Replace('\0', ' ');
                 }
                 Cursor = Cursors.WaitCursor;
+                // 何も入力していない無題タブならそのまま使い、そうでなければ新しいタブで開く
+                if (!IsPristineUntitled(cur)) AddDoc();
                 filePath = Path.GetFullPath(path);
                 fileEnc = enc;
                 eol = e;
@@ -1027,6 +1058,13 @@ namespace Okaed
                     d.FilterIndex = IsMarkdownPath(filePath) ? 2 : (Path.GetExtension(filePath).ToLowerInvariant() == ".txt" ? 1 : 3);
                 }
                 if (d.ShowDialog(this) != DialogResult.OK) return false;
+                Doc other = FindDocByPath(Path.GetFullPath(d.FileName));
+                if (other != null && other != cur)
+                {
+                    MessageBox.Show(this, "そのファイルはほかのタブで開いています。\n先にそのタブを閉じるか、別の名前で保存してください。",
+                        AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return false;
+                }
                 string oldDir = filePath == null ? null : Path.GetDirectoryName(filePath);
                 if (!WriteTo(d.FileName)) return false;
                 filePath = Path.GetFullPath(d.FileName);
@@ -1075,10 +1113,12 @@ namespace Okaed
 
         bool IsDirty { get { return editor.IsDirty || metaDirty; } }
 
-        bool ConfirmDiscard()
+        /// <summary>タブ(文書)を閉じる前の確認。未保存なら保存するか尋ねる。キャンセルなら false</summary>
+        bool ConfirmClose(Doc doc)
         {
-            if (!IsDirty) return true;
-            string name = filePath == null ? "無題" : Path.GetFileName(filePath);
+            if (!doc.IsDirty) return true;
+            if (doc != cur) SwitchTo(doc);   // どのタブへの確認か分かるように、そのタブを表示する
+            string name = doc.Title;
             DialogResult r = MessageBox.Show(this, name + " への変更を保存しますか?", AppName, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
             if (r == DialogResult.Cancel) return false;
             if (r == DialogResult.Yes) return Save();
@@ -1118,8 +1158,8 @@ namespace Okaed
             bool d = IsDirty;
             if (!force && d == lastDirtyShown) return;
             lastDirtyShown = d;
-            string name = filePath == null ? "無題" : Path.GetFileName(filePath);
-            Text = (d ? "* " : "") + name + " - " + AppTitleWithVersion;
+            RefreshTabs();
+            Text = (d ? "* " : "") + cur.Title + " - " + AppTitleWithVersion;
         }
 
         void OnDragEnter(object sender, DragEventArgs e)
@@ -1131,16 +1171,17 @@ namespace Okaed
         {
             string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
             if (files == null || files.Length == 0) return;
-            string f = files[0];
             BeginInvoke(new MethodInvoker(delegate
             {
-                if (File.Exists(f) && ConfirmDiscard()) OpenFile(f);
+                foreach (string f in files)
+                    if (File.Exists(f)) OpenFile(f);
             }));
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (!ConfirmDiscard()) { e.Cancel = true; return; }
+            foreach (Doc d in docs.ToArray())
+                if (!ConfirmClose(d)) { e.Cancel = true; return; }
             SaveSettings();
             base.OnFormClosing(e);
         }
@@ -1148,7 +1189,7 @@ namespace Okaed
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             try { if (previewFile != null && File.Exists(previewFile)) File.Delete(previewFile); } catch { }
-            DeleteAutosaveFile();
+            foreach (Doc d in docs) DeleteAutosaveFile(d);
             if (hotkeyRegistered) { try { UnregisterHotKey(Handle, HOTKEY_ID); } catch { } }
             if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); }
             base.OnFormClosed(e);
@@ -1185,6 +1226,7 @@ namespace Okaed
         void Poll()
         {
             UpdateTitle(false);
+            RefreshTabs();
             EditorBox.POINT sp = editor.ScrollPos;
             Size cs = editor.ClientSize;
             bool moved = sp.X != lastScroll.X || sp.Y != lastScroll.Y || cs != lastClient;
@@ -1214,6 +1256,9 @@ namespace Okaed
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            // タブの切り替え: Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+PageDown / Ctrl+PageUp
+            if (keyData == (Keys.Control | Keys.Tab) || keyData == (Keys.Control | Keys.PageDown)) { SelectNextTab(1); return true; }
+            if (keyData == (Keys.Control | Keys.Shift | Keys.Tab) || keyData == (Keys.Control | Keys.PageUp)) { SelectNextTab(-1); return true; }
             if (keyData == Keys.Escape)
             {
                 if (txtFind.Focused || txtReplace.Focused || cmbFont.Focused || cmbSize.Focused)
@@ -1531,7 +1576,7 @@ namespace Okaed
                 BeginInvoke(new MethodInvoker(delegate
                 {
                     string ext = (Path.GetExtension(p) ?? "").ToLowerInvariant();
-                    if ((IsMarkdownPath(p) || ext == ".txt") && ConfirmDiscard()) OpenFile(p);
+                    if (IsMarkdownPath(p) || ext == ".txt") OpenFile(p);
                 }));
             }
         }
